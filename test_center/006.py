@@ -1,0 +1,220 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from linegraph import n_linegraph
+from section import section
+
+# Lorenz 系统的微分方程
+def lorenz(x, a):
+    dx = (25 * a + 10) * (x[1] - x[0])
+    dy = (28 - 35 * a) * x[0] - x[0] * x[2] + (29 * a - 1) * x[1]
+    dz = x[0] * x[1] - (8 + a) / 3 * x[2]
+    return np.array([dx, dy, dz])
+
+# 四阶龙格-库塔法离散化 Lorenz 系统
+def runge_kutta_lorenz(a, x0, dt, num_steps):
+    t = np.zeros(num_steps + 1)
+    x = np.zeros((num_steps + 1, 3))
+    x[0] = x0
+
+    for i in range(num_steps):
+        t[i+1] = t[i] + dt
+
+        k1 = lorenz(x[i], a)
+        k2 = lorenz(x[i] + (dt / 2) * k1, a)
+        k3 = lorenz(x[i] + (dt / 2) * k2, a)
+        k4 = lorenz(x[i] + dt * k3, a)
+
+        x[i+1] = x[i] + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+    return t, x
+
+# 计算动态方程的梯度
+def runge_kutta_step(x, laplacian_1, laplacian_2, a, dt):
+    def f(x):
+        return lorenz(x, a)
+    
+    def H(x):
+        return np.array([x[0], 0, 0])  # 耦合函数H(x), 仅考虑x分量的耦合
+
+    def G(x):
+        return np.array([x[0], 0, 0])  # 内连函数Gamma(x)
+    
+    dxdt = np.zeros_like(x)  # 保存每个节点的变化率
+    N = len(x)
+    for i in range(N):
+        coupling_sum_1 = 0
+        coupling_sum_2 = 0
+        for j in range(N):
+            coupling_sum_1 += (laplacian_1[i, j] * H(x[j]))
+            coupling_sum_2 += (laplacian_2[i, j] * G(x[j]))
+        dxdt[i] = f(x[i]) + coupling_sum_1 + coupling_sum_2
+
+    return dxdt
+
+# 使用四阶龙格-库塔法进行同步动力学模拟
+def simulate_dynamics(laplacian_1, laplacian_2, initial_state, a, dt, num_steps):
+    N = len(initial_state)
+    state_history = np.zeros((N, num_steps + 1, 3))  # 状态历史记录
+    state_history[:, 0, :] = initial_state  # 初始状态
+    
+    for step in range(num_steps):
+        k1 = runge_kutta_step(state_history[:, step, :], laplacian_1, laplacian_2, a, dt)
+        k2 = runge_kutta_step(state_history[:, step, :] + 0.5 * dt * k1, laplacian_1, laplacian_2, a, dt / 2)
+        k3 = runge_kutta_step(state_history[:, step, :] + 0.5 * dt * k2, laplacian_1, laplacian_2, a, dt / 2)
+        k4 = runge_kutta_step(state_history[:, step, :] + dt * k3, laplacian_1, laplacian_2, a, dt)
+        
+        state_history[:, step + 1, :] = state_history[:, step, :] + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
+    
+    error_history = np.zeros(num_steps)  # 保存每个时间步的误差
+    for step in range(num_steps):
+        error_history[step] = calculate_error(state_history, N, step)
+    
+    return state_history, error_history
+
+# 计算误差函数
+def calculate_error(state, N, t):
+    error = 0
+    distances = []
+    for i in range(N):
+        for j in range(N):
+            if i != j:  # 避免计算同一个节点之间的差异
+                error = 0  # 重置error
+                for n in range(3):  # 对 x, y, z 分量进行计算
+                    diff = state[i, t, n] - state[j, t, n]
+                    error += np.sqrt(diff ** 2)  # 计算每个分量的差的平方根并累加
+                distance = np.sqrt(error)
+                distances.append(distance)
+    distances = np.array(distances)  # 将差值列表转换为NumPy数组
+    std_dev = np.std(distances, ddof=0)  # 样本标准差使用ddof=0，计算的是整个群体（总体）的标准差
+
+    return std_dev
+
+# 构建三维邻接矩阵Supra-Adjacent
+def Supra_Adjacent(hyper_network):
+    M = hyper_network.shape[0]
+    N = hyper_network.shape[1]
+    structural_matrix = np.zeros((M, N, N))
+    for k in range(M):
+        for j in range(N):
+            for i in range(j, N):
+                if hyper_network[k][j] == hyper_network[k][i] == 1 and i != j:
+                    structural_matrix[k][i][j] = 1
+                    structural_matrix[k][j][i] = 1
+
+    return structural_matrix
+
+# 构建超边内Laplacian矩阵L_1
+def Laplacian_inner(matrix, C):
+    M = matrix.shape[0]
+    N = matrix.shape[1]
+    L_1 = np.zeros((N, N))
+    for k in range(M):
+        L = np.zeros_like(L_1)
+        count_nonzero = 0
+        for i in range(N):
+            count_nonzero = np.count_nonzero(matrix[k, i, :])
+            if count_nonzero != 0:
+                L[i, :] = matrix[k, i, :] / count_nonzero
+                L[i][i] = -np.sum(matrix[k, i, :]) / count_nonzero
+        L_1 += L
+    return L_1 * C / M
+
+# 构建关联超边Laplacian矩阵L_2
+def Laplacian_outer(matrix, line_graph, C):
+    M = matrix.shape[0]
+    N = matrix.shape[1]
+    L_2 = np.zeros((N, N))
+    for j in range(M):
+        for i in range(j, M):
+            L = np.zeros_like(L_2)
+            matrix_A = matrix[i, :, :]
+            matrix_B = matrix[j, :, :]
+            if line_graph[i][j] != 0:
+                matrix_C = matrix_A @ matrix_B
+                matrix_C[matrix_C != line_graph[i][j]] = 0
+                L = matrix_C
+            count_nonzero = 0
+            for k in range(N):
+                count_nonzero = np.count_nonzero(L[k, :])
+                if count_nonzero != 0:
+                    L[k, :] = L[k, :] / count_nonzero
+                    L[k][k] = -np.sum(L[k, :]) / count_nonzero
+            for p in range(N):
+                for q in range(p, N):
+                    L[p, q] = L[q, p]
+            L_2 += L
+    return L_2 * C
+
+from BA import BA_non_uniform
+from linegraph import weighting_linegraph
+# 构建非均匀BA超网络
+total_hyper_e_num = 20
+# hyper_adjacent_matrix = BA_non_uniform(total_hyper_e_num, 1, 10)  # 构建网络
+# hyper_adjacent_matrix = np.array(([1,1,1,0,0,0,0],
+#                                   [0,1,1,1,1,0,0],
+#                                   [1,0,0,0,1,1,1]))
+# 从CSV文件中加载矩阵
+filename = f'network_{total_hyper_e_num}.csv'
+hyper_adjacent_matrix = np.loadtxt(filename, delimiter=',')
+M = hyper_adjacent_matrix.shape[0]
+N = hyper_adjacent_matrix.shape[1]
+all_line_graph = weighting_linegraph(hyper_edge_matrix=hyper_adjacent_matrix)  # 转加权线图
+a = 0  # 统一混沌系统参数
+h = 0
+C_1 = 270  # 超边内耦合强度
+C_2 = 0  # 超边间耦合强度
+print("网络构建完成")
+
+# 参数设置
+# sigma = 10
+# rho = 28
+# beta = 8 / 3
+x0 = np.array([40.0, 40.0, 20.0])
+dt = 0.01  # 减小时间步长以提高数值稳定性
+num_steps = 10000
+
+# 构建示例的拉普拉斯矩阵 (这里使用了一个简单的例子)
+# N = 3  # 假设有 3 个节点
+# laplacian = np.array([[1, -1, 0],
+#                       [-1, 2, -1],
+#                       [0, -1, 1]])
+N = hyper_adjacent_matrix.shape[1]
+# matrix = -supra_laplacian(supra_network=Supra_Adjacent(hyper_network=hyper_adjacent_matrix), line_graph=all_line_graph, C_1=C_1, C_2=C_2)
+# laplacian = Matrix_Merge(matrix)
+# matrix = section(hyper_edge_matrix=hyper_adjacent_matrix)
+# for p in range(N):
+#     matrix[p, p] = -np.sum(matrix[p])
+# laplacian = -matrix * C_1
+# print(Eigenvalue_ratio(adjacency_matrix=laplacian))
+L_1 = Laplacian_inner(matrix=Supra_Adjacent(hyper_network=hyper_adjacent_matrix), C=C_1)
+L_2 = Laplacian_outer(matrix=Supra_Adjacent(hyper_network=hyper_adjacent_matrix), line_graph=weighting_linegraph(hyper_edge_matrix=hyper_adjacent_matrix), C=C_2)
+print("Laplacian_Matrix构建完成")
+
+# 初始化状态并添加微小扰动
+initial_state = np.array([x0 for _ in range(N)])
+perturbation = 10.0  # 微小扰动
+initial_state += np.random.normal(0, perturbation, initial_state.shape)
+
+# 进行模拟
+state_history, error_history = simulate_dynamics(laplacian_1=L_1, laplacian_2=L_2, initial_state=initial_state, a=a, dt=dt, num_steps=num_steps)
+
+# 绘制轨迹
+plt.figure(figsize=(12, 6))
+
+# 绘制 Lorenz 系统轨迹
+plt.subplot(1, 2, 1)
+for i in range(N):
+    plt.plot(state_history[i, :, 0], state_history[i, :, 1], lw=0.5)
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('State Trajectories')
+
+# 绘制误差曲线
+plt.subplot(1, 2, 2)
+plt.plot(np.arange(num_steps), error_history)
+plt.xlabel('Time Step')
+plt.ylabel('Error')
+plt.title('Error vs Time Step')
+
+plt.tight_layout()
+plt.show()
